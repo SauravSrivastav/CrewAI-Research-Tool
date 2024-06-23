@@ -4,19 +4,20 @@ import cohere
 import requests
 from crewai import Agent, Task, Crew, Process
 
-from langchain_groq import ChatGroq
-from langchain_cohere import ChatCohere
+from langchain_openai import ChatOpenAI
+from langchain_community.chat_models import ChatCohere
 
-from crewai_tools import tool
+from langchain.tools import DuckDuckGoSearchRun
+from crewai_tools import SeleniumScrapingTool, ScrapeWebsiteTool
 from duckduckgo_search import DDGS
 
 # Ensure essential environment variables are set
 cohere_api_key = os.getenv('COHERE_API_KEY')
 if not cohere_api_key:
     raise EnvironmentError("COHERE_API_KEY is not set in environment variables")
-groq_api_key = os.getenv("GROQ_API_KEY")
-if not groq_api_key:
-    raise EnvironmentError("GROQ_API_KEY is not set in environment variables")
+openai_api_key = os.getenv("OPENAI_API_KEY")
+if not openai_api_key:
+    raise EnvironmentError("OPENAI_API_KEY is not set in environment variables")
 
 # Initialize API clients
 co = cohere.Client(cohere_api_key)
@@ -36,20 +37,18 @@ def fetch_content(url):
         st.error(f"Error fetching content: {e}")
         return f"Error fetching content: {e}"
 
-@tool('DuckDuckGoSearchResults')
 def search_results(search_query: str) -> dict:
     """Performs a web search to gather and return a collection of search results."""
     results = DDGS().text(search_query, max_results=5, timelimit='m')
     results_list = [{"title": result['title'], "snippet": result['body'], "link": result['href']} for result in results]
     return results_list
 
-@tool('WebScrapper')
 def web_scrapper(url: str, topic: str) -> str:
     """Extracts and reads the content of a specified link and generates a summary on a specific topic."""
     content = fetch_content(url)
     prompt = f"Generate a summary of the following content on the topic ## {topic} ### \n\nCONTENT:\n\n" + content
     response = co.chat(
-        model='command-r-plus',
+        model='command-r',
         message=prompt,
         temperature=0.4,
         max_tokens=1000,
@@ -67,63 +66,47 @@ def web_scrapper(url: str, topic: str) -> str:
 
 def kickoff_crew(topic: str) -> dict:
     try:
-        groq_llm_70b = ChatGroq(temperature=0, groq_api_key=groq_api_key, model_name="llama3-70b-8192")
-        cohere_llm = ChatCohere(temperature=0, cohere_api_key=cohere_api_key, model_name="command-r-plus")
-        selected_llm = groq_llm_70b
+        openai_llm = ChatOpenAI(temperature=0, openai_api_key=openai_api_key)
+        cohere_llm = ChatCohere(temperature=0, cohere_api_key=cohere_api_key)
+        selected_llm = openai_llm
 
         researcher = Agent(
             role='Researcher',
             goal=f'Search and Collect detailed information on topic ## {topic} ##',
-            tools=[search_results, web_scrapper],
-            llm=selected_llm,
             backstory="You are a meticulous researcher, skilled at navigating vast amounts of information to extract essential insights on any given topic.",
             allow_delegation=False,
-            max_iter=15,
-            max_rpm=20,
-            memory=True,
+            llm=selected_llm,
+            tools=[
+                DuckDuckGoSearchRun(),
+                SeleniumScrapingTool(),
+                ScrapeWebsiteTool()
+            ],
             verbose=True
         )
 
         editor = Agent(
             role='Editor',
             goal=f'Compile and refine the information into a comprehensive report on topic ## {topic} ##',
-            llm=selected_llm,
             backstory="As an expert editor, you specialize in transforming raw data into clear, engaging reports.",
             allow_delegation=False,
-            max_iter=5,
-            max_rpm=15,
-            memory=True,
+            llm=selected_llm,
             verbose=True
         )
 
         research_task = Task(
-            description=f"Use the DuckDuckGoSearchResults tool to collect initial search snippets on ## {topic} ##. "
-                        f"If more detailed searches are required, generate and execute new queries related to ## {topic} ##. "
-                        f"Subsequently, employ the WebScrapper tool to delve deeper into significant URLs identified from the snippets, extracting further information and insights. "
-                        f"Compile these findings into a preliminary draft, documenting all relevant sources, titles, and links associated with the topic. "
-                        f"Ensure high accuracy throughout the process and avoid any fabrication or misrepresentation of information.",
-            expected_output="A structured draft report about the topic, featuring an introduction, a detailed main body organized by different aspects of the topic, and a conclusion. "
-                            "Each section should properly cite sources, providing a thorough overview of the information gathered.",
+            description=f"Research the topic: {topic}. Use search tools to find relevant information, then use web scraping tools to gather more detailed data from the most promising sources.",
             agent=researcher
         )
 
         edit_task = Task(
-            description=f"Review and refine the initial draft report from the research task. Organize the content logically to enhance information flow. "
-                        f"Verify the accuracy of all data, correct discrepancies, and update information to ensure it reflects current knowledge and is well-supported by sources. "
-                        f"Improve the report's readability by enhancing language clarity, adjusting sentence structures, and maintaining a consistent tone. "
-                        f"Include a section listing all sources used, formatted as bullet points following this template: "
-                        f"- title: url'.",
-            expected_output=f"A polished, comprehensive report on topic ## {topic} ##, with a clear, professional narrative that accurately reflects the research findings. "
-                            f"The report should include an introduction, an extensive discussion section, a concise conclusion, and a well-organized source list. "
-                            f"Ensure the document is grammatically correct and ready for publication or presentation.",
-            agent=editor,
-            context=[research_task]
+            description=f"Review and refine the research on {topic}. Create a well-structured report with an introduction, main body, and conclusion. Ensure all information is accurate and properly cited.",
+            agent=editor
         )
 
         crew = Crew(
             agents=[researcher, editor],
             tasks=[research_task, edit_task],
-            process=Process.sequential,
+            process=Process.sequential
         )
 
         result = crew.kickoff()
