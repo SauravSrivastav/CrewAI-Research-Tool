@@ -1,0 +1,7 @@
+streamlit
+crewai
+crewai[tools]
+langchain-groq
+langchain-cohere
+duckduckgo-search
+cohere
